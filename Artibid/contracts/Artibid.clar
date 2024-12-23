@@ -22,6 +22,7 @@
 (define-constant err-invalid-price (err u109))
 (define-constant err-invalid-duration (err u110))
 (define-constant err-invalid-auction-id (err u111))
+(define-constant err-list-full (err u112))
 
 ;; Data Variables
 (define-data-var base-bid uint u1000000) ;; in microSTX
@@ -48,11 +49,21 @@
     { bid-value: uint }
 )
 
+;; List to track all auction IDs
+(define-data-var auction-list (list 1000 uint) (list))
+
 ;; Private Functions
 (define-private (get-new-auction-id)
     (let ((current-id (var-get auction-id-counter)))
         (var-set auction-id-counter (+ current-id u1))
-        current-id
+        (if (< (len (var-get auction-list)) u999)
+            (ok (begin
+                (var-set auction-list (unwrap! (as-max-len? (append (var-get auction-list) current-id) u1000) err-list-full))
+                current-id))
+            (ok (begin
+                (print "Auction list is full. Oldest auctions may not be tracked.")
+                current-id))
+        )
     )
 )
 
@@ -65,6 +76,27 @@
 
 (define-private (is-valid-auction-id (auction-id uint))
     (and (> auction-id u0) (< auction-id (var-get auction-id-counter)))
+)
+
+(define-private (is-open-auction (id uint))
+    (match (map-get? auction-records { auction-id: id })
+        auction (get is-open auction)
+        false
+    )
+)
+
+(define-private (is-creator-auction (id uint) (target-creator principal))
+    (match (map-get? auction-records { auction-id: id })
+        auction (is-eq (get creator auction) target-creator)
+        false
+    )
+)
+
+(define-private (is-closing-before (id uint) (target-time uint))
+    (match (map-get? auction-records { auction-id: id })
+        auction (<= (get closing-time auction) target-time)
+        false
+    )
 )
 
 ;; Public Functions
@@ -84,7 +116,7 @@
     (min-price uint)
     (duration uint))
     (let (
-        (new-id (get-new-auction-id))
+        (new-id (unwrap! (get-new-auction-id) err-list-full))
         (current-time (var-get global-timestamp))
     )
         (asserts! (> token-id u0) err-invalid-token-id)
@@ -115,101 +147,82 @@
 )
 
 (define-public (place-bid (auction-id uint) (bid-amount uint))
-    (begin
+    (let (
+        (auction (unwrap! (map-get? auction-records { auction-id: auction-id }) err-auction-not-found))
+        (current-max-bid (get max-bid auction))
+        (current-time (var-get global-timestamp))
+    )
         (asserts! (is-valid-auction-id auction-id) err-invalid-auction-id)
-        (let (
-            (auction (unwrap! (map-get? auction-records { auction-id: auction-id }) err-auction-not-found))
-            (current-max-bid (get max-bid auction))
-            (current-time (var-get global-timestamp))
+        (asserts! (get is-open auction) err-auction-closed)
+        (asserts! (< current-time (get closing-time auction)) err-auction-closed)
+        (asserts! (> bid-amount current-max-bid) err-insufficient-bid)
+        
+        (try! (stx-transfer? bid-amount tx-sender (as-contract tx-sender)))
+        
+        (match (get leading-bidder auction) previous-leader
+            (try! (as-contract (stx-transfer? current-max-bid tx-sender previous-leader)))
+            true
         )
-            (asserts! (get is-open auction) err-auction-closed)
-            (asserts! (< current-time (get closing-time auction)) err-auction-closed)
-            (asserts! (> bid-amount current-max-bid) err-insufficient-bid)
-            
-            ;; Transfer bid amount to contract
-            (try! (stx-transfer? bid-amount tx-sender (as-contract tx-sender)))
-            
-            ;; Refund previous bidder if exists
-            (match (get leading-bidder auction) previous-leader
-                (begin
-                    (try! (as-contract (stx-transfer? current-max-bid tx-sender previous-leader)))
-                    (map-set auction-records
-                        { auction-id: auction-id }
-                        (merge auction {
-                            max-bid: bid-amount,
-                            leading-bidder: (some tx-sender)
-                        })
-                    )
-                )
-                (map-set auction-records
-                    { auction-id: auction-id }
-                    (merge auction {
-                        max-bid: bid-amount,
-                        leading-bidder: (some tx-sender)
-                    })
-                )
-            )
-            
-            ;; Record bid in history
-            (map-set bid-history
-                { auction-id: auction-id, participant: tx-sender }
-                { bid-value: bid-amount }
-            )
-            
-            (ok true)
+        
+        (map-set auction-records
+            { auction-id: auction-id }
+            (merge auction {
+                max-bid: bid-amount,
+                leading-bidder: (some tx-sender)
+            })
         )
+        
+        (map-set bid-history
+            { auction-id: auction-id, participant: tx-sender }
+            { bid-value: bid-amount }
+        )
+        
+        (ok true)
     )
 )
 
 (define-public (finalize-auction (auction-id uint) (nft-contract <nft-standard>))
-    (begin
+    (let (
+        (auction (unwrap! (map-get? auction-records { auction-id: auction-id }) err-auction-not-found))
+        (current-time (var-get global-timestamp))
+    )
         (asserts! (is-valid-auction-id auction-id) err-invalid-auction-id)
-        (let (
-            (auction (unwrap! (map-get? auction-records { auction-id: auction-id }) err-auction-not-found))
-            (current-time (var-get global-timestamp))
+        (asserts! (get is-open auction) err-auction-closed)
+        (asserts! (>= current-time (get closing-time auction)) err-auction-in-progress)
+        (asserts! (is-eq (contract-of nft-contract) (get nft-contract-address auction)) err-invalid-nft-contract)
+        
+        (map-set auction-records
+            { auction-id: auction-id }
+            (merge auction { is-open: false })
         )
-            (asserts! (get is-open auction) err-auction-closed)
-            (asserts! (>= current-time (get closing-time auction)) err-auction-in-progress)
-            (asserts! (is-eq (contract-of nft-contract) (get nft-contract-address auction)) err-invalid-nft-contract)
-            
-            ;; Close the auction
-            (map-set auction-records
-                { auction-id: auction-id }
-                (merge auction { is-open: false })
+        
+        (if (is-some (get leading-bidder auction))
+            (let (
+                (auction-winner (unwrap! (get leading-bidder auction) err-auction-not-found))
             )
-            
-            ;; Transfer NFT and funds based on auction outcome
-            (if (is-some (get leading-bidder auction))
-                (let (
-                    (auction-winner (unwrap! (get leading-bidder auction) err-auction-not-found))
-                )
-                    ;; Transfer NFT to winner
-                    (try! (as-contract 
-                        (contract-call? 
-                            nft-contract
-                            transfer
-                            (get nft-token-id auction)
-                            tx-sender
-                            auction-winner
-                        )
-                    ))
-                    ;; Transfer funds to creator
-                    (try! (as-contract (stx-transfer? (get max-bid auction) tx-sender (get creator auction))))
-                    (ok true)
-                )
-                ;; Return NFT to creator if no bids
-                (begin
-                    (try! (as-contract 
-                        (contract-call? 
-                            nft-contract
-                            transfer
-                            (get nft-token-id auction)
-                            tx-sender
-                            (get creator auction)
-                        )
-                    ))
-                    (ok true)
-                )
+                (try! (as-contract 
+                    (contract-call? 
+                        nft-contract
+                        transfer
+                        (get nft-token-id auction)
+                        tx-sender
+                        auction-winner
+                    )
+                ))
+                (try! (as-contract (stx-transfer? (get max-bid auction) tx-sender (get creator auction))))
+                (ok true)
+            )
+            (begin
+                (try! (as-contract 
+                    (contract-call? 
+                        nft-contract
+                        transfer
+                        (get nft-token-id auction)
+                        tx-sender
+                        (get creator auction)
+                    )
+                ))
+                (ok true)
             )
         )
     )
@@ -228,3 +241,48 @@
     (var-get global-timestamp)
 )
 
+(define-read-only (get-all-auctions)
+    (var-get auction-list)
+)
+
+(define-read-only (get-open-auctions)
+    (fold check-and-add-open-auction (var-get auction-list) (list))
+)
+
+(define-read-only (get-auctions-by-creator (creator principal))
+    (fold check-and-add-creator-auction (var-get auction-list) (list))
+)
+
+(define-read-only (get-auctions-by-closing-time (target-time uint))
+    (fold check-and-add-closing-time-auction (var-get auction-list) (list))
+)
+
+(define-read-only (get-auction-count)
+    (len (var-get auction-list))
+)
+
+(define-read-only (get-open-auction-count)
+    (len (get-open-auctions))
+)
+
+;; Helper functions for filtering
+(define-private (check-and-add-open-auction (id uint) (result (list 1000 uint)))
+    (if (is-open-auction id)
+        (unwrap-panic (as-max-len? (append result id) u1000))
+        result
+    )
+)
+
+(define-private (check-and-add-creator-auction (id uint) (result (list 1000 uint)))
+    (if (is-creator-auction id tx-sender)
+        (unwrap-panic (as-max-len? (append result id) u1000))
+        result
+    )
+)
+
+(define-private (check-and-add-closing-time-auction (id uint) (result (list 1000 uint)))
+    (if (is-closing-before id (var-get global-timestamp))
+        (unwrap-panic (as-max-len? (append result id) u1000))
+        result
+    )
+)

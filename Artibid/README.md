@@ -1,122 +1,115 @@
-# Artibid NFT Auction Smart Contract
+# Artibid - NFT Auction Smart Contract
 
-## Overview
-Artibid is a decentralized NFT auction platform built on Stacks blockchain using Clarity smart contracts. It enables users to create, participate in, and manage NFT auctions with secure handling of both NFT transfers and STX payments.
+Artibid is a decentralized NFT auction platform implemented as a smart contract on the Stacks blockchain. It enables users to create and participate in time-based auctions for NFTs, with secure handling of bids and automatic settlement of transactions.
 
 ## Features
-- Create NFT auctions with customizable duration and reserve price
-- Place bids with automatic refund handling for outbid participants
-- Automatic auction finalization with secure transfer of NFTs and funds
-- Complete bid history tracking
-- Time-based auction mechanics with customizable timestamps
+
+- Create time-bounded NFT auctions
+- Place bids with automatic refunds of previous bids
+- Secure transfer of NFTs and STX tokens
+- Auction tracking and management
+- Comprehensive auction and bid history
 - Support for any NFT implementing the standard NFT trait
 
-## Contract Details
+## Contract Functions
 
-### Constants
-- `contract-owner`: The deploying address of the contract
-- `base-bid`: Minimum bid amount in microSTX (default: 1,000,000 microSTX = 1 STX)
+### Administrative Functions
+
+- `update-global-time`: Updates the contract's global timestamp (admin only)
+
+### Core Auction Functions
+
+- `initiate-auction`: Create a new NFT auction
+- `place-bid`: Place a bid on an active auction
+- `finalize-auction`: Complete an auction and transfer assets
+
+### Read-Only Functions
+
+- `get-auction-details`: Get details of a specific auction
+- `get-bid-details`: Get bid history for a specific auction and bidder
+- `get-current-timestamp`: Get the current contract timestamp
+- `get-all-auctions`: Get a list of all auction IDs
+- `get-open-auctions`: Get a list of currently open auctions
+- `get-auctions-by-creator`: Get auctions created by a specific address
+- `get-auctions-by-closing-time`: Get auctions closing before a specific time
+- `get-auction-count`: Get total number of auctions
+- `get-open-auction-count`: Get number of open auctions
+
+## Technical Details
+
+### NFT Standard Trait
+
+The contract expects NFTs to implement the following trait:
+```clarity
+(define-trait nft-standard
+    (
+        (transfer (uint principal principal) (response bool uint))
+        (get-owner (uint) (response principal uint))
+    )
+)
+```
 
 ### Error Codes
-- `err-not-authorized (u100)`: Caller not authorized for the operation
-- `err-auction-not-found (u101)`: Specified auction does not exist
-- `err-auction-closed (u102)`: Auction has already ended
-- `err-insufficient-bid (u103)`: Bid amount too low
-- `err-auction-in-progress (u104)`: Auction still in progress
-- `err-invalid-nft-contract (u105)`: Invalid NFT contract address
-- `err-transfer-failed (u106)`: STX or NFT transfer failed
 
-## Public Functions
+- `u100`: Not authorized
+- `u101`: Auction not found
+- `u102`: Auction closed
+- `u103`: Insufficient bid
+- `u104`: Auction in progress
+- `u105`: Invalid NFT contract
+- `u106`: Transfer failed
+- `u107`: Invalid time
+- `u108`: Invalid token ID
+- `u109`: Invalid price
+- `u110`: Invalid duration
+- `u111`: Invalid auction ID
+- `u112`: List full
 
-### `initiate-auction`
-Creates a new auction for an NFT.
+### Storage
 
-Parameters:
-- `nft-contract`: NFT contract implementing the nft-standard trait
-- `token-id`: ID of the NFT to auction
-- `min-price`: Minimum acceptable bid in microSTX
-- `duration`: Auction duration in block height units
+- Auctions are stored in `auction-records` map
+- Bid history is stored in `bid-history` map
+- Active auction IDs are tracked in `auction-list` (limited to 1000 entries)
 
-Returns: Auction ID (uint)
+## Usage Examples
 
-### `place-bid`
-Places a bid on an active auction.
-
-Parameters:
-- `auction-id`: ID of the target auction
-- `bid-amount`: Bid amount in microSTX
-
-Returns: Boolean indicating success
-
-### `finalize-auction`
-Concludes an auction after its closing time.
-
-Parameters:
-- `auction-id`: ID of the auction to finalize
-- `nft-contract`: NFT contract address for verification
-
-Returns: Boolean indicating success
-
-### `update-global-time`
-Updates the contract's global timestamp (admin only).
-
-Parameters:
-- `new-time`: New timestamp value
-
-Returns: Boolean indicating success
-
-## Read-Only Functions
-
-### `get-auction-details`
-Retrieves details of a specific auction.
-
-Parameters:
-- `auction-id`: ID of the auction
-
-Returns: Auction record or none
-
-### `get-bid-details`
-Retrieves bid history for a specific participant in an auction.
-
-Parameters:
-- `auction-id`: ID of the auction
-- `bidder`: Principal address of the bidder
-
-Returns: Bid record or none
-
-### `get-current-timestamp`
-Returns the current global timestamp.
-
-Returns: Current timestamp (uint)
-
-```
-
-## Testing
-
-Create test scenarios in the `tests` directory covering:
-- Auction creation
-- Bid placement
-- Auction finalization
-- Error conditions
-- NFT and STX transfers
-
-## Usage Example
+### Creating an Auction
 
 ```clarity
-;; Create new auction
-(contract-call? .artibid initiate-auction .my-nft u1 u1000000 u100)
+(contract-call? .artibid initiate-auction .my-nft u123 u1000000 u86400)
+```
+This creates an auction for token #123 from the my-nft contract with a minimum bid of 1 STX and duration of 24 hours.
 
-;; Place bid
+### Placing a Bid
+
+```clarity
 (contract-call? .artibid place-bid u1 u1500000)
+```
+This places a bid of 1.5 STX on auction #1.
 
-;; Finalize auction
+### Finalizing an Auction
+
+```clarity
 (contract-call? .artibid finalize-auction u1 .my-nft)
 ```
+This finalizes auction #1 and transfers the NFT and STX to the appropriate parties.
+
+## Limitations
+
+- Maximum of 1000 tracked auctions
+- No partial refunds (bids must be higher than current highest bid)
+- Time-based mechanics rely on manual timestamp updates
 
 ## Security Considerations
 
-1. Always verify NFT ownership before initiating auctions
-2. Ensure sufficient STX balance before placing bids
-3. Monitor auction closing times
-4. Verify NFT contract addresses during finalization
-5. Handle all error cases in client implementations
+- NFTs are held in escrow by the contract during auctions
+- Automatic refund of outbid amounts
+- Only auction creator can finalize auction
+- Timestamps must be updated by contract owner
+- Reserve price enforcement
+- Proper validation of all inputs
+
+## Contract Dependencies
+
+- Stacks blockchain
+- NFT contract implementing the standard NFT trait
